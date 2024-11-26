@@ -21,7 +21,9 @@ from sampling_fo2.parser import parse_input
 from sampling_fo2.fol.syntax import Const, Pred, QFFormula, PREDS_FOR_EXISTENTIAL
 from sampling_fo2.utils.polynomial import coeff_dict, create_vars, expand
 
-
+from parser.mln_parser import parse as mln_parse
+from sampling_fo2.problems import WFOMCSProblem, MLN_to_WFOMC
+import copy
 class Algo(Enum):
     STANDARD = 'standard'
     FASTER = 'faster'
@@ -30,7 +32,11 @@ class Algo(Enum):
     def __str__(self):
         return self.value
 
-
+# 计算给定配置的权重，使用更快的算法
+# config: 配置列表
+# cell_weights: 单元权重列表
+# edge_weights: 边权重矩阵
+# 返回配置的权重
 def get_config_weight_standard_faster(config: list[int],
                                       cell_weights: list[RingElement],
                                       edge_weights: list[list[RingElement]]) \
@@ -51,7 +57,10 @@ def get_config_weight_standard_faster(config: list[int],
             res *= edge_weights[i][j] ** (n_i * n_j)
     return res
 
-
+# 计算给定单元图和配置的权重，使用标准算法
+# cell_graph: 单元图
+# cell_config: 单元配置字典
+# 返回配置的权重
 def get_config_weight_standard(cell_graph: CellGraph,
                                cell_config: dict[Cell, int]) -> RingElement:
     res = Rational(1, 1)
@@ -78,7 +87,12 @@ def get_config_weight_standard(cell_graph: CellGraph,
     # logger.debug('Config weight: %s', res)
     return res
 
-
+# 使用优化的单元图和更快的算法计算加权一阶模型计数（WFOMC）
+# formula: 公式
+# domain: 域
+# get_weight: 获取权重的回调函数
+# modified_cell_sysmmetry: 是否使用修改后的单元对称性
+# 返回WFOMC结果
 def faster_wfomc(formula: QFFormula,
                domain: set[Const],
                get_weight: Callable[[Pred], tuple[RingElement, RingElement]],
@@ -127,6 +141,11 @@ def faster_wfomc(formula: QFFormula,
 
     return res
 
+# 使用标准算法计算加权一阶模型计数（WFOMC）
+# formula: 公式
+# domain: 域
+# get_weight: 获取权重的回调函数
+# 返回WFOMC结果
 def standard_wfomc(formula: QFFormula,
                    domain: set[Const],
                    get_weight: Callable[[Pred], tuple[RingElement, RingElement]]) -> RingElement:
@@ -150,7 +169,11 @@ def standard_wfomc(formula: QFFormula,
         )
     return res
 
-
+# 预计算存在量词的权重
+# cell_graph: 单元图
+# domain_size: 域大小
+# context: WFOMC上下文
+# 返回存在量词权重的字典
 def precompute_ext_weight(cell_graph: CellGraph, domain_size: int,
                           context: WFOMCContext) \
         -> dict[frozenset[tuple[Cell, frozenset[Pred], int]], RingElement]:
@@ -194,7 +217,10 @@ def precompute_ext_weight(cell_graph: CellGraph, domain_size: int,
         existential_weights[eu_config] /= dup_factor
     return existential_weights
 
-
+# 根据指定算法计算加权一阶模型计数（WFOMC）
+# context: WFOMC上下文
+# algo: 算法类型（标准或更快）
+# 返回WFOMC结果
 def wfomc(context: WFOMCContext, algo: Algo = Algo.STANDARD) -> Rational:
     if algo == Algo.STANDARD:
         res = standard_wfomc(
@@ -211,7 +237,11 @@ def wfomc(context: WFOMCContext, algo: Algo = Algo.STANDARD) -> Rational:
     res = context.decode_result(res)
     return res
 
-
+# 计算谓词的计数分布
+# context: WFOMC上下文
+# preds: 谓词列表
+# algo: 算法类型（标准或更快）
+# 返回计数分布的字典
 def count_distribution(context: WFOMCContext, preds: list[Pred],
                        algo: Algo = Algo.STANDARD) \
         -> dict[tuple[int, ...], Rational]:
@@ -260,28 +290,137 @@ def parse_args():
     parser.add_argument('--debug', action='store_true', default=False)
     args = parser.parse_args()
     return args
+def count_distribution_v2(context: WFOMCContext, preds1: list[Pred], preds2: list[Pred], mode: int,
+                       algo: Algo = Algo.STANDARD) \
+        -> dict[tuple[int, ...], Rational]:
+    context_c = copy.deepcopy(context)
+    pred2weight = {}
+    pred2sym = {}
+    preds = list(set(preds1+preds2))
+    preds3 = {} #指定算哪部分的wmc
+    if mode==1:
+        preds3 = preds1
+    else:
+        preds3 = preds2
+    syms = create_vars('x0:{}'.format(len(preds)))
+    for sym, pred in zip(syms, preds):
+        if pred in pred2weight:
+            continue
+        weight = context_c.get_weight(pred)
+        if pred in preds3:
+            pred2weight[pred] = (weight[0] * sym, 1)#False的weight赋1
+        else:
+            pred2weight[pred] = (sym, 1)      #preds2的先不管
+        pred2sym[pred] = sym
+    #把除preds即新preds以外的weight赋1
+    for pred in context_c.formula.preds():
+        if pred not in preds:
+            pred2weight[pred] = (1,1)
+
+    context_c.weights.update(pred2weight)
+    aa = context_c.weights
+
+    if algo == Algo.STANDARD:
+        res = standard_wfomc(
+            context_c.formula, context_c.domain, context_c.get_weight
+        )
+    elif algo == Algo.FASTER:
+        res = faster_wfomc(
+            context_c.formula, context_c.domain, context_c.get_weight
+        )
+
+    symbols = [pred2sym[pred] for pred in preds]
+    count_dist = {}
+    res = expand(res)
+    for degrees, coef in coeff_dict(res, symbols):
+        count_dist[degrees] = coef
+    return count_dist
+def MLN_TV(context: WFOMCContext, context1: WFOMCContext, preds1: list[Pred],
+           context2: WFOMCContext, preds2: list[Pred]) -> Rational:
+    #context1是mln1构造用来求Z1的formuler,preds1是新谓词,类似的context2，preds2，context是mln1、mln2合并构造的formuler
+
+    Z1 = standard_wfomc(
+        context1.formula, context1.domain, context1.get_weight
+    )
+    Z2 = standard_wfomc(
+        context2.formula, context2.domain, context2.get_weight
+    )
+    count_dist1 = count_distribution_v2(context, list(preds1), list(preds2), 1)
+    count_dist2 = count_distribution_v2(context, list(preds1), list(preds2), 2)
+    res = Rational(0, 1)
+    for key in count_dist1:
+        res = res+abs(count_dist1[key]/Z1-count_dist2[key]/Z2)
+    return res
+
+def MLN_TV_V2(mln1: str,mln2: str) -> Rational:
+    if mln1.endswith('.mln'):
+        with open(mln1, 'r') as f:
+            input_content = f.read()
+        mln_problem1 = mln_parse(input_content)
+        wfomcs_problem1 = MLN_to_WFOMC(mln_problem1,'@F')
+        context1 = WFOMCContext(wfomcs_problem1)
+
+    if mln2.endswith('.mln'):
+        with open(mln2, 'r') as f:
+            input_content = f.read()
+        mln_problem2 = mln_parse(input_content)
+        wfomcs_problem2 = MLN_to_WFOMC(mln_problem2, '@S')
+        context2 = WFOMCContext(wfomcs_problem2)
+    Z1 = standard_wfomc(
+        context1.formula, context1.domain, context1.get_weight
+    )
+    Z2 = standard_wfomc(
+        context2.formula, context2.domain, context2.get_weight
+    )
+    context = copy.deepcopy(context1)
+    context.formula = context1.formula & context2.formula
+    context.weights = {**context1.weights, **context2.weights}
+    #这里没有对context的sentence做处理可能有隐患
+    #利用context1.weights.keys只包含了新谓词，而context.formula.preds()包含所有谓词，可能有隐患
+    #MLN_to_WFOMC貌似会对旧谓词的权重全赋为1
+    a = context1.weights.keys()
+    b = context2.weights.keys()
+    count_dist1 = count_distribution_v2(context, list(a), list(b), 1)
+    count_dist2 = count_distribution_v2(context, list(a), list(b), 2)
+    res = Rational(0, 1)
+    for key in count_dist1:
+        res = res + abs(count_dist1[key] / Z1 - count_dist2[key] / Z2)
+    return res
+
+
+
+
 
 
 if __name__ == '__main__':
     # import sys
     # sys.setrecursionlimit(int(1e6))
-    args = parse_args()
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir)
-    if args.debug:
-        logzero.loglevel(logging.DEBUG)
-    else:
-        logzero.loglevel(logging.INFO)
-    logzero.logfile('{}/log.txt'.format(args.output_dir), mode='w')
 
-    with Timer() as t:
-        problem = parse_input(args.input)
-    context = WFOMCContext(problem)
-    logger.info('Parse input: %ss', t)
+    # args = parse_args()
+    # if not os.path.exists(args.output_dir):
+    #     os.makedirs(args.output_dir)
+    # if args.debug:
+    #     logzero.loglevel(logging.DEBUG)
+    # else:
+    #     logzero.loglevel(logging.INFO)
+    # logzero.logfile('{}/log.txt'.format(args.output_dir), mode='w')
+    #
+    # with Timer() as t:
+    #     problem = parse_input(args.input)
+    # context = WFOMCContext(problem)
+    # logger.info('Parse input: %ss', t)
+    #
+    # res = wfomc(
+    #     context, algo=args.algo
+    # )
+    # logger.info('WFOMC (arbitrary precision): %s', res)
+    # round_val = round_rational(res)
+    # logger.info('WFOMC (round): %s (exp(%s))', round_val, round_val.ln())
 
-    res = wfomc(
-        context, algo=args.algo
-    )
-    logger.info('WFOMC (arbitrary precision): %s', res)
-    round_val = round_rational(res)
-    logger.info('WFOMC (round): %s (exp(%s))', round_val, round_val.ln())
+    mln1 = "models\\friends-smokes.mln"
+    mln2 = "models\\friends-smokes2.mln"
+    res = MLN_TV_V2(mln1, mln2)
+    print(res)
+
+
+
