@@ -47,7 +47,7 @@ class CardinalityConstraint(Constraint):
     def transform_weighting(self, get_weight: Callable[[Pred], tuple[Rational, Rational]]) \
             -> dict[Pred, tuple[Rational, Rational]]:
         new_weights: dict[Pred, tuple[RingElement, RingElement]] = {}
-        self.gen_vars = create_vars('x0:{}'.format(
+        self.gen_vars = create_vars('cc0:{}'.format(
             len(self.preds))
         )
         for sym, pred in zip(self.gen_vars, self.preds):

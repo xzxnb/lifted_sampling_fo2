@@ -21,7 +21,13 @@ from sampling_fo2.parser import parse_input
 from sampling_fo2.fol.syntax import Const, Pred, QFFormula, PREDS_FOR_EXISTENTIAL
 from sampling_fo2.utils.polynomial import coeff_dict, create_vars, expand
 
+from sampling_fo2.parser.mln_parser import parse as mln_parse
+from sampling_fo2.problems import WFOMCSProblem, MLN_to_WFOMC, MLN_to_WFOMC2
+import copy
 
+from typing import Any
+from sampling_fo2.fol.syntax import AtomicFormula, Const, Pred, top, AUXILIARY_PRED_NAME, \
+    Formula, QuantifiedFormula, Universal, Equivalence, bot
 class Algo(Enum):
     STANDARD = 'standard'
     FASTER = 'faster'
@@ -209,8 +215,9 @@ def wfomc(context: WFOMCContext, algo: Algo = Algo.STANDARD) -> Rational:
         res = faster_wfomc(
             context.formula, context.domain, context.get_weight, True
         )
+    sym_res = res / context.repeat_factor
     res = context.decode_result(res)
-    return res
+    return res,sym_res
 
 
 def count_distribution(context: WFOMCContext, preds: list[Pred],
@@ -242,6 +249,113 @@ def count_distribution(context: WFOMCContext, preds: list[Pred],
         count_dist[degrees] = coef
     return count_dist
 
+def count_distribution_v2(context: WFOMCContext, preds1: list[Pred], preds2: list[Pred], mode: int,
+                       algo: Algo = Algo.STANDARD) \
+        -> dict[tuple[int, ...], Rational]:
+    context_c = copy.deepcopy(context)
+    pred2weight = {}
+    pred2sym = {}
+    preds = list(set(preds1+preds2))
+    preds3 = [] #指定算哪部分的wmc
+    if mode==1:
+        preds3 = preds1
+    else:
+        preds3 = preds2
+    syms = create_vars('x0:{}'.format(len(preds)))#创建未知数
+    for sym, pred in zip(syms, preds):
+        if pred in pred2weight:
+            continue
+        weight = context_c.get_weight(pred)
+        if pred in preds3:
+            pred2weight[pred] = (weight[0] * sym, 1)#False的weight赋1
+        else:
+            pred2weight[pred] = (sym, 1)      #preds2的先不管
+        pred2sym[pred] = sym
+
+    context_c.weights.update(pred2weight)
+    aa = context_c.weights
+
+    if algo == Algo.STANDARD:
+        res = standard_wfomc(
+            context_c.formula, context_c.domain, context_c.get_weight
+        )
+    elif algo == Algo.FASTER:
+        res = faster_wfomc(
+            context_c.formula, context_c.domain, context_c.get_weight
+        )
+    symbols = [pred2sym[pred] for pred in preds]
+    count_dist = {}
+    res = expand(res)
+    if context_c.decode_result(res) ==0:
+        return {'0':0}
+
+    for degrees, coef in coeff_dict(res, symbols):
+        count_dist[degrees] = coef
+    return count_dist
+
+def MLN_TV_V2(mln1: str,mln2: str) -> Rational:
+    if mln1.endswith('.mln'):
+        with open(mln1, 'r') as f:
+            input_content = f.read()
+        mln_problem1 = mln_parse(input_content)
+
+        wfomcs_problem1 = MLN_to_WFOMC(mln_problem1,'@F')
+        context1 = WFOMCContext(wfomcs_problem1)
+
+    if mln2.endswith('.mln'):
+        with open(mln2, 'r') as f:
+            input_content = f.read()
+        mln_problem2 = mln_parse(input_content)
+        wfomcs_problem2 = MLN_to_WFOMC(mln_problem2, '@S')
+        context2 = WFOMCContext(wfomcs_problem2)
+    Z1 = standard_wfomc(
+        context1.formula, context1.domain, context1.get_weight
+    )
+    Z2 = standard_wfomc(
+        context2.formula, context2.domain, context2.get_weight
+    )
+    context = copy.deepcopy(context1)
+    context.formula = context1.formula & context2.formula
+    context.weights = {**context1.weights, **context2.weights}
+    #这里没有对context的sentence做处理可能有隐患
+    #利用context1.weights.keys只包含了新谓词，而context.formula.preds()包含所有谓词，可能有隐患
+    #MLN_to_WFOMC貌似会对旧谓词的权重全赋为1
+    a = list(context1.weights.keys())
+    a = [s for s in a if s.name.startswith("@F")]
+    b = list(context2.weights.keys())
+    b = [s for s in b if s.name.startswith("@S")]
+
+    count_dist1 = count_distribution_v2(context, a, b, 1)
+    count_dist2 = count_distribution_v2(context, a, b, 2)
+    res = Rational(0, 1)
+    for key in count_dist1:
+        if key == tuple():
+            continue
+        res = res + abs(count_dist1[key] / Z1 - count_dist2[key] / Z2)
+
+    #hard_rule = MLN_to_WFOMC2(mln_problem2)
+    wfomcs_problem4 = MLN_to_WFOMC2(mln_problem1, mln_problem2, '@F')
+    context4 = WFOMCContext(wfomcs_problem4)
+    rr = wfomc(context4)
+    a = list(context4.weights.keys())
+    a = [s for s in a if s.name.startswith("@F")]
+    count_dist4 = count_distribution_v2(context4, a, [], 1)
+    for key in count_dist4:
+        if key == tuple():
+            continue
+        res = res + abs(count_dist4[key] / Z1)
+
+    wfomcs_problem3 = MLN_to_WFOMC2(mln_problem2, mln_problem1, '@S')
+    context3 = WFOMCContext(wfomcs_problem3)
+    rr = wfomc(context3)
+    b = list(context3.weights.keys())
+    b = [s for s in b if s.name.startswith("@S")]
+    count_dist3 = count_distribution_v2(context3, [], b, 2)
+    for key in count_dist3:
+        if key == tuple():
+            continue
+        res = res + abs(count_dist3[key] / Z2)
+    return res
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -266,23 +380,27 @@ def parse_args():
 if __name__ == '__main__':
     # import sys
     # sys.setrecursionlimit(int(1e6))
-    args = parse_args()
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir)
-    if args.debug:
-        logzero.loglevel(logging.DEBUG)
-    else:
-        logzero.loglevel(logging.INFO)
-    logzero.logfile('{}/log.txt'.format(args.output_dir), mode='w')
-
-    with Timer() as t:
-        problem = parse_input(args.input)
-    context = WFOMCContext(problem)
-    logger.info('Parse input: %ss', t)
-
-    res = wfomc(
-        context, algo=args.algo
-    )
-    logger.info('WFOMC (arbitrary precision): %s', res)
-    round_val = round_rational(res)
-    logger.info('WFOMC (round): %s (exp(%s))', round_val, round_val.ln())
+    # args = parse_args()
+    # if not os.path.exists(args.output_dir):
+    #     os.makedirs(args.output_dir)
+    # if args.debug:
+    #     logzero.loglevel(logging.DEBUG)
+    # else:
+    #     logzero.loglevel(logging.INFO)
+    # logzero.logfile('{}/log.txt'.format(args.output_dir), mode='w')
+    #
+    # with Timer() as t:
+    #     problem = parse_input(args.input)
+    # context = WFOMCContext(problem)
+    # logger.info('Parse input: %ss', t)
+    #
+    # res = wfomc(
+    #     context, algo=args.algo
+    # )
+    # logger.info('WFOMC (arbitrary precision): %s', res)
+    # round_val = round_rational(res)
+    # logger.info('WFOMC (round): %s (exp(%s))', round_val, round_val.ln())
+    mln1 = "models\\E-R1.mln"
+    mln2 = "models\\E-R2.mln"
+    res = MLN_TV_V2(mln1, mln2)
+    print(res)

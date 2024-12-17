@@ -1,6 +1,6 @@
 ~friends(X,X).
 friends(X,Y) -> friends(Y,X).
-2 friends(X,Y) & smokes(X) -> smokes(Y)
+3 friends(X,Y) & smokes(X) -> smokes(Y)
 
 # a existential quantified formula
 # -1 \exists Y: (friends(X,Y))
